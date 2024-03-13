@@ -8,7 +8,7 @@ import threading
 
 # Twilio credentials
 account_sid = 'AC19a072a45d3916f7d9c49b8582207ab0'
-auth_token = '[AuthToken]'
+auth_token = '[]'
 client_twilio = Client(account_sid, auth_token)
 
 # Google Sheets credentials
