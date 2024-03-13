@@ -1,0 +1,143 @@
+from twilio.rest import Client
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import requests
+from datetime import datetime, timedelta
+from pytz import timezone
+import threading
+
+# Twilio credentials
+account_sid = 'AC19a072a45d3916f7d9c49b8582207ab0'
+auth_token = '[AuthToken]'
+client_twilio = Client(account_sid, auth_token)
+
+# Google Sheets credentials
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
+client_gs = gspread.authorize(creds)
+
+# Google Sheets document keys
+players_sheet_key = 'players_sheet_key'
+admins_sheet_key = 'admins_sheet_key'
+availability_sheet_key = 'availability_sheet_key'
+
+# Twilio phone number and hockey team group
+twilio_number = '+18559522513'
+hockey_team_group = ['+1234567890', '+0987654321']  # Example phone numbers
+admin_group = ['+18777804236']  # Admin phone numbers
+
+# Timezone
+cst = timezone('US/Central')
+
+
+def send_text_message(recipient, message):
+    client_twilio.messages.create(
+        to=recipient,
+        from_=twilio_number,
+        body=message
+    )
+
+
+def send_group_message(recipients, message):
+    for recipient in recipients:
+        send_text_message(recipient, message)
+
+
+def get_weather_forecast(zip_code):
+    api_key = 'your_weather_api_key'
+    url = f'http://api.openweathermap.org/data/2.5/weather?zip={zip_code}&appid={api_key}'
+    response = requests.get(url)
+    data = response.json()
+    weather = data['weather'][0]['main']
+    return weather
+
+
+def update_attendance(game_time):
+    sheet = client_gs.open_by_key(players_sheet_key).sheet1
+    players = sheet.get_all_records()
+
+    confirmed_players = []
+    maybe_players = []
+    out_players = []
+
+    for player in players:
+        response = input(f"Can {player['Name']} play tonight? (in/maybe/no): ").lower()
+        if response == 'in' or response == 'yes':
+            confirmed_players.append(player['Phone'])
+            update_availability(player['Name'], 'in')
+        elif response == 'maybe':
+            maybe_players.append(player['Phone'])
+            update_availability(player['Name'], 'maybe')
+        elif response == 'no':
+            out_players.append(player['Phone'])
+            update_availability(player['Name'], 'out')
+
+    in_count = len(confirmed_players)
+    maybe_count = len(maybe_players)
+    out_count = len(out_players)
+
+    if in_count >= 6:
+        send_group_message(hockey_team_group, f"Game is on! {in_count} players confirmed for {game_time}.")
+    else:
+        send_group_message(hockey_team_group, f"Game canceled for {game_time}. Not enough players confirmed.")
+
+    # Send follow-up messages to maybe players
+    for player in maybe_players:
+        send_text_message(player, f"Please confirm your availability for tonight's game at {game_time}.")
+
+    # Send initial update to all players
+    for player in confirmed_players + maybe_players:
+        send_text_message(player, f"Thanks for letting us know, we currently have:\n"
+                                  f"- In: {in_count}\n"
+                                  f"- Maybe: {maybe_count}\n"
+                                  f"- Out: {out_count}")
+
+    # Send update only to players who responded 'no'
+    for player in out_players:
+        send_text_message(player, "Thank you for letting us know.")
+
+
+def update_availability(player_name, response):
+    sheet = client_gs.open_by_key(availability_sheet_key).sheet1
+    current_date = datetime.now().strftime('%Y-%m-%d')
+    cell = sheet.find(player_name)
+    row = cell.row
+    col = sheet.find(current_date).col
+    if response == 'in':
+        sheet.update_cell(row, col, int(sheet.cell(row, col).value) + 1)
+    elif response == 'maybe':
+        sheet.update_cell(row, col + 1, int(sheet.cell(row, col + 1).value) + 1)
+    elif response == 'out':
+        sheet.update_cell(row, col + 2, int(sheet.cell(row, col + 2).value) + 1)
+
+
+def check_weather_forecast(zip_code):
+    weather = get_weather_forecast(zip_code)
+    if weather == 'Rain':
+        send_group_message(admin_group, "Weather forecast: Rain. Admins, please monitor rink conditions.")
+
+
+def admin_interface():
+    while True:
+        message = input("Enter your command (update, forecast, message, exit): ")
+        send_group_message(admin_group, message)
+
+
+def ask_for_next_game_details():
+    game_date = input("Enter the date of the next game (YYYY-MM-DD): ")
+    game_time = input("Enter the time of the next game (HH:MM): ")
+    send_group_message(admin_group, f"Next game scheduled for {game_date} at {game_time}.")
+    # Schedule the program to start asking the group at 7:30 AM CST on the game day
+    game_datetime = datetime.strptime(f"{game_date} {game_time}", '%Y-%m-%d %H:%M').replace(tzinfo=cst)
+    current_time = datetime.now(cst)
+    delay = (game_datetime - current_time).total_seconds()
+    threading.Timer(delay, update_attendance, [game_time]).start()
+
+
+if __name__ == "__main__":
+    # Introduction text asking for game details
+    send_group_message(admin_group, "Welcome! Please provide details for the next game.")
+    # Ask for the date and time of the next game
+    ask_for_next_game_details()
+    # Start the admin interface
+    admin_interface()
